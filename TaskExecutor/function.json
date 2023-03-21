@@ -1,0 +1,19 @@
+{
+  "scriptFile": "__init__.py",
+  "bindings": [
+    {
+      "name": "msgin",
+      "type": "queueTrigger",
+      "direction": "in",
+      "queueName": "tasks",
+      "connection": "AzureWebJobsStorage"
+    },
+    {
+      "type": "queue",
+      "direction": "out",
+      "name": "msgout",
+      "queueName": "tasks",
+      "connection": "AzureWebJobsStorage"
+    }
+  ]
+}

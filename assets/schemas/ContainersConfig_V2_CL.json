@@ -1,0 +1,1 @@
+[{"TimeGenerated": "2023-01-01T00:00:00.000000Z", "DatabaseAccountName": "xxx", "DatabaseName": "xxx", "ContainerName": "xxx", "ContainerThroughputMode": "xxx", "ContainerThroughputType": "xxx", "ContainerThroughput": 100, "ContainerIndexingIsDefault": true, "ContainerTTL": 100, "AdditionalData": {}}]

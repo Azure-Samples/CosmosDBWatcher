@@ -1,0 +1,155 @@
+let DatabaseAccounts = materialize(
+    DatabaseAccountsConfig_V2_CL
+    | where TimeGenerated > ago(1d)
+    | summarize arg_max(TimeGenerated, *) by DatabaseAccountName
+    | project-rename DatabaseAccountAdditionalData=AdditionalData
+    | project-away TimeGenerated, TenantId, Type, _ResourceId, _SubscriptionId
+);
+let Databases = materialize(
+    DatabasesConfig_V2_CL
+    | where TimeGenerated > ago(1d)
+    | summarize arg_max(TimeGenerated, *) by DatabaseAccountName, DatabaseName
+    | project-rename DatabaseAdditionalData=AdditionalData
+    | project-away TimeGenerated, TenantId, Type, _ResourceId, _SubscriptionId
+);
+let Containers = materialize(
+    ContainersConfig_V2_CL
+    | where TimeGenerated > ago(1d)
+    | summarize arg_max(TimeGenerated, *) by DatabaseAccountName, DatabaseName, ContainerName
+    | project-rename ContainerAdditionalData=AdditionalData, IsDefaultIndexing=ContainerIndexingIsDefault, TTL=ContainerTTL
+    | project-away TimeGenerated, TenantId, Type, _ResourceId, _SubscriptionId
+);
+let Cost = materialize(
+    CostData_CL
+    | where UsageTimestamp between (ago(8d) .. ago(1d)) and isnotempty(ContainerRid)
+    | summarize TimeGenerated=max(TimeGenerated) by UsageTimestamp
+    | join kind=rightsemi (
+        CostData_CL
+        | where UsageTimestamp between (ago(8d) .. ago(1d)) and isnotempty(ContainerRid)
+    ) on TimeGenerated, UsageTimestamp
+    | extend ContainerName=iff(tolower(ContainerName) == '__empty', '', ContainerName)
+    | summarize PreTaxCost=sum(PreTaxCost) by DatabaseAccountName, DatabaseName=tolower(DatabaseName), ContainerName=tolower(ContainerName), CosmosResourceId=tolower(ContainerRid)
+);
+DatabaseAccounts
+| join kind=leftouter (Databases) on DatabaseAccountName
+| join kind=leftouter (Containers) on DatabaseAccountName, DatabaseName
+| project-away DatabaseAccountName1, DatabaseAccountName2, DatabaseName1
+| extend
+    DefaultConsistency=tostring(DatabaseAccountAdditionalData.consistency_policy.default_consistency_level),
+    Regions=array_length(DatabaseAccountAdditionalData.locations),
+    IsFreeTier=tobool(DatabaseAccountAdditionalData.enable_free_tier),
+    IsMultiRegionWrite=tobool(DatabaseAccountAdditionalData.enable_multiple_write_locations),
+    IsZoneRedundant=iff(DatabaseAccountAdditionalData.locations has 'true', true, false),
+    EffectiveThroughputType=coalesce(ContainerThroughputType, DatabaseThroughputType),
+    EffectiveThroughputMode=coalesce(ContainerThroughputMode, DatabaseThroughputMode),
+    EffectiveThroughput=coalesce(ContainerThroughput, DatabaseThroughput)
+| project-reorder SubscriptionId, SubscriptionName, ResourceGroup, DatabaseAccountName, DatabaseName, ContainerName, APIKind, DefaultConsistency, Regions, EffectiveThroughputType, EffectiveThroughputMode, EffectiveThroughput
+| join kind=leftouter (
+    ContainersMetrics_CL
+    | where MetricTimestamp > ago(7d)
+    | summarize 
+        SampleHours=dcountif(bin(MetricTimestamp, 1h), MetricName == 'TotalRequests'),
+        TotalRequests=sumif(MetricValue, MetricName == 'TotalRequests'),
+        QueryCharge=sumif(MetricValue, MetricName == 'TotalRequestUnits' and MetricMetadata.OperationType in ('Query')),
+        ReadCharge=sumif(MetricValue, MetricName == 'TotalRequestUnits' and MetricMetadata.OperationType in ('Read', 'ReadFeed')),
+        WriteCharge=sumif(MetricValue, MetricName == 'TotalRequestUnits' and MetricMetadata.OperationType in ('Create', 'Replace', 'Patch')),
+        StoredProcCharge=sumif(MetricValue, MetricName == 'TotalRequestUnits' and MetricMetadata.OperationType in ('Excecute')),
+        OtherCharge=sumif(MetricValue, MetricName == 'TotalRequestUnits' and MetricMetadata.OperationType !in ('Query', 'Read', 'ReadFeed', 'Create', 'Replace', 'Patch', 'Excecute')),
+        DataUsed=maxif(MetricValue, MetricName == 'DataUsage'),
+        IndexUsed=maxif(MetricValue, MetricName == 'IndexUsage'),
+        DocumentCount=maxif(MetricValue, MetricName == 'DocumentCount'),
+        PhysicalPartitions=dcountif(tostring(MetricMetadata.PartitionKeyRangeId), MetricName == 'NormalizedRUConsumption')
+        by DatabaseAccountName, DatabaseName, ContainerName
+    | extend TotalRUCharge=toreal(QueryCharge + ReadCharge + WriteCharge + StoredProcCharge + OtherCharge)
+    | extend 
+        QueryChargePercent=iff(TotalRUCharge == 0, real(0), round(QueryCharge/TotalRUCharge*100, 3)),
+        ReadChargePercent=iff(TotalRUCharge == 0, real(0), round(ReadCharge/TotalRUCharge*100, 3)),
+        WriteChargePercent=iff(TotalRUCharge == 0, real(0), round(WriteCharge/TotalRUCharge*100, 3)),
+        StoredProcChargePercent=iff(TotalRUCharge == 0, real(0), round(StoredProcCharge/TotalRUCharge*100, 3)),
+        EstimatedRUPerMonth=round(TotalRUCharge/SampleHours*730),
+        AvgDocumentSizeKb=round(toreal(DataUsed/DocumentCount)/pow(1024, 1), 3),
+        DataUsedGB=round(toreal(DataUsed/pow(1024, 3)), 3),
+        IndexUsedGB=round(toreal(IndexUsed/pow(1024, 3)), 3)
+    | project-away TotalRUCharge, QueryCharge, ReadCharge, WriteCharge, StoredProcCharge, DataUsed, IndexUsed
+) on DatabaseAccountName, DatabaseName, ContainerName
+| project-away DatabaseAccountName1, DatabaseName1, ContainerName1
+| join kind=leftouter (
+    ContainersMetrics_CL
+    | where MetricTimestamp > ago(7d)
+    | where MetricName in ('TotalRequests', 'TotalRequestUnits')
+    | join kind=leftouter (
+        DatabaseAccounts
+        | project 
+            DatabaseAccountName,
+            PrimaryRegionName=tostring(DatabaseAccountAdditionalData.read_locations[0].location_name)
+    ) on DatabaseAccountName
+    | project-away DatabaseAccountName1
+    | summarize 
+        TotalRequestsPrimaryRegion=sumif(MetricValue, MetricName == 'TotalRequests' and tostring(MetricMetadata.Region) == PrimaryRegionName),
+        TotalRequestsOtherRegions=sumif(MetricValue, MetricName == 'TotalRequests' and tostring(MetricMetadata.Region) != PrimaryRegionName),
+        TotalRequestUnitsPrimaryRegion=sumif(MetricValue, MetricName == 'TotalRequestUnits' and tostring(MetricMetadata.Region) == PrimaryRegionName),
+        TotalRequestUnitsOtherRegions=sumif(MetricValue, MetricName == 'TotalRequestUnits' and tostring(MetricMetadata.Region) != PrimaryRegionName)
+        by MetricTimestamp=bin(MetricTimestamp, 1h), DatabaseAccountName, DatabaseName, ContainerName
+    | summarize 
+        TotalRequestsPrimaryRegion=sum(TotalRequestsPrimaryRegion),
+        TotalRequestsOtherRegions=sum(TotalRequestsOtherRegions),
+        TotalRequestUnitsPrimaryRegion=sum(TotalRequestUnitsPrimaryRegion),
+        TotalRequestUnitsOtherRegions=sum(TotalRequestUnitsOtherRegions),
+        PercentageOfHoursWithNoRequests=round(countif(TotalRequestsPrimaryRegion < 10)/toreal(count())*100, 3)
+        by DatabaseAccountName, DatabaseName, ContainerName
+    | extend
+        OtherRegionsRequestRatio=iff(TotalRequestsPrimaryRegion + TotalRequestsOtherRegions == 0, real(0), round(TotalRequestsOtherRegions/toreal(TotalRequestsPrimaryRegion + TotalRequestsOtherRegions)*100, 3)),
+        OtherRegionsThroughputRatio=iff(TotalRequestUnitsPrimaryRegion + TotalRequestUnitsOtherRegions == 0, real(0), round(TotalRequestUnitsOtherRegions/toreal(TotalRequestUnitsPrimaryRegion + TotalRequestUnitsOtherRegions)*100, 3))
+    | project-away TotalRequestsPrimaryRegion, TotalRequestsOtherRegions, TotalRequestUnitsPrimaryRegion, TotalRequestUnitsOtherRegions
+) on DatabaseAccountName, DatabaseName, ContainerName
+| project-away DatabaseAccountName1, DatabaseName1, ContainerName1
+| join kind=leftouter (
+    ContainersMetrics_CL
+    | where MetricTimestamp > ago(1d)
+    | where MetricName == 'NormalizedRUConsumption'
+    | join kind=leftouter (
+        DatabaseAccounts
+        | project 
+            DatabaseAccountName,
+            PrimaryRegionName=tostring(DatabaseAccountAdditionalData.read_locations[0].location_name)
+    ) on DatabaseAccountName
+    | project-away DatabaseAccountName1
+    | where tostring(MetricMetadata.Region) == PrimaryRegionName
+    | summarize 
+        AvgPartitionThroughput=avg(MetricValue)
+        by DatabaseAccountName, DatabaseName, ContainerName, PartitionKeyRangeId=tostring(MetricMetadata.PartitionKeyRangeId)
+    | summarize Count=count(), MinPartitionThroughput=min(AvgPartitionThroughput), MaxPartitionThroughput=max(AvgPartitionThroughput)
+        by DatabaseAccountName, DatabaseName, ContainerName
+    | where Count > 1
+    | extend LikelyPartitionThroughputSkew=iff(
+        MinPartitionThroughput == 0,
+        iff(MaxPartitionThroughput == 0, false, true), 
+        iff((MaxPartitionThroughput/MinPartitionThroughput) > 2, true, false))
+    | where LikelyPartitionThroughputSkew
+    | project-away MinPartitionThroughput, MaxPartitionThroughput, Count
+) on DatabaseAccountName, DatabaseName, ContainerName
+| project-away DatabaseAccountName1, DatabaseName1, ContainerName1
+| extend LikelyPartitionThroughputSkew=iff(isnull(LikelyPartitionThroughputSkew) and isnotempty(ContainerName), false, LikelyPartitionThroughputSkew)
+| extend CosmosContainerId=tolower(ContainerAdditionalData.resource.rid), CosmosDatabaseId=tolower(DatabaseAdditionalData.resource.rid)
+//try to join based on ContainerId
+| join kind=leftouter (Cost) on $left.CosmosContainerId == $right.CosmosResourceId
+| project-away DatabaseAccountName1, DatabaseName1, ContainerName1, CosmosResourceId
+| project-rename PreTaxCost1=PreTaxCost
+| extend _DatabaseName=tolower(DatabaseName), _ContainerName=tolower(ContainerName)
+//sometimes ContainerId is not available in Config, try to join on name
+| join kind=leftouter (Cost) on DatabaseAccountName, $left._DatabaseName == $right.DatabaseName,  $left._ContainerName == $right.ContainerName
+| project-away DatabaseAccountName1, DatabaseName1, ContainerName1, CosmosResourceId
+| project-rename PreTaxCost2=PreTaxCost
+//try to join based on DatabaseId
+| join kind=leftouter (Cost) on $left.CosmosDatabaseId == $right.CosmosResourceId
+| project-away DatabaseAccountName1, DatabaseName1, ContainerName1, CosmosResourceId
+| project-rename PreTaxCost3=PreTaxCost
+//sometimes DatabaseId is not available in Config, try to join on name
+| extend _ContainerName=''
+| join kind=leftouter (Cost) on DatabaseAccountName, $left._DatabaseName == $right.DatabaseName,  $left._ContainerName == $right.ContainerName
+| project-away DatabaseAccountName1, DatabaseName1, ContainerName1, CosmosResourceId
+| project-rename PreTaxCost4=PreTaxCost
+//take first non-null cost
+| extend PreTaxCost=coalesce(PreTaxCost1, PreTaxCost2, PreTaxCost3, PreTaxCost4)
+| project-away PreTaxCost1, PreTaxCost2, PreTaxCost3, PreTaxCost4, _DatabaseName, _ContainerName, CosmosContainerId, CosmosDatabaseId
+| sort by SubscriptionName asc, ResourceGroup asc, DatabaseAccountName asc, DatabaseName asc, ContainerName asc

@@ -1,13 +1,13 @@
-## [project-title] Changelog
+## Azure Cosmos DB Watcher Changelog
 
 <a name="x.y.z"></a>
-# x.y.z (yyyy-mm-dd)
+# 1.0.0 (2023-03-21)
 
 *Features*
-* ...
+* Initial release
 
 *Bug Fixes*
-* ...
+* N/A
 
 *Breaking Changes*
-* ...
+* N/A
