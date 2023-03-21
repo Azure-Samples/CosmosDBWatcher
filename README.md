@@ -1,10 +1,10 @@
-#Azure Cosmos DB Watcher
+# Azure Cosmos DB Watcher
 <p align="right" width="100%">
     <img width="10%" src="assets/media/Azure_Cosmos_DB_Icon.svg">
 </p>
 Azure Cosmos DB Watcher is a scraper tool that helps provide visibility into your sprawling Cosmos DB estate. It periodically collects metrics, configuration, and cost data and presents it a single dashboard. Cosmos DB Watcher can be used to understand which Cosmos DB accounts and containers drive most of the cost, or where opportunities to optimize for performance or cost lie. It is not intended to be a solution for real-time monitoring/alerting on production issues.
 
-##Motivation
+## Motivation
 Telemetry data within Azure Metrics, billing data in Cost Management, or container and account configuration data directly in Cosmos DB are all incredibly useful to understanding how well one's Cosmos DB accounts are tuned. There is currently no place in Azure Portal that would aggregate all the these data sources, present a combined view, and do so at scale across multiple Azure subscriptions. Moreover, for tracking purposes, it would very useful to not just have such a combined view available as of right now, but be able to also compare across days, weeks, and months. After thorough evaluation, we concluded that in order to meet all these requirements a custom monitoring solution would be needed. The key design considerations for the new solution were:
 * scalability - see data across hundreds of subscriptions, accounts, and thousands of containers
 * detailed cost - cost and performance are tightly related but seeing cost at the container level is not currently possible in Cost Management
@@ -13,7 +13,7 @@ Telemetry data within Azure Metrics, billing data in Cost Management, or contain
 * low cost - be extremely low cost so even customers with smaller Cosmos DB footprints would not be discouraged from deploying this scraper and dashboard
 * tight permissions - only provide Control Plane-level permissions to enable deployment in enterprise production environments
 
-##Architecture
+## Architecture
 ![Architecture diagram](assets/media/watcher_architecture.png)
 
 This solution relies heavily on Storage queues and Azure Functions for scalability and to keep costs at a minimum. For reference, during testing we monitored 2 subscriptions with 25 Cosmos DB accounts and a total of about 100 container for period of one month. Every day the processing took <2 minutes and the cost incurred for the whole month for all components of this solution was less than $1.
@@ -22,7 +22,7 @@ On a high level, there are three main steps. Firstly, once per day a timer-trigg
 
 In a separate flow, a blob-triggered `CostReportProcessor` function parses a CSV file that is automatically landed by Cost Export in Storage account. The CSV file includes billing data for all services provisioned in a given monitored Azure subscription and `CostReportProcessor` filters only rows relevant to Cosmos DB. Same as in the other flows, the resulting cost data is persisted within Log Analytics workspace. A clean up process leveraging Lifecycle Management Policy is set up to prevent accumulation of processed CSV files in Storage account.
 
-##Install
+## Install
 1) Create a new Resource group
 2) Storage Account
     * Create a new Storage Account v2
@@ -72,10 +72,10 @@ In a separate flow, a blob-triggered `CostReportProcessor` function parses a CSV
 
 *Note: Future iteration will provide a one-click deploy ARM template for the above steps.*
 
-##Contributing
+## Contributing
 If you would like to contribute to this sample, see [CONTRIBUTING.MD](CONTRIBUTING.MD).
 
 This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). For more information, see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
 
-##License
+## License
 MIT. Copyright &copy; Microsoft Corporation.
